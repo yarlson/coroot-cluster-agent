@@ -16,8 +16,10 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/elasticache"
+	"github.com/aws/aws-sdk-go-v2/service/keyspaces"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
@@ -45,19 +47,25 @@ type Discoverer struct {
 	ctx    context.Context
 	reg    prometheus.Registerer
 	logs   *common.LogsPipeline
-	stop   chan struct{}
+	stop    chan struct{}
+	refresh chan struct{}
 
 	rdsClient            *rds.Client
 	elasticacheClient    *elasticache.Client
 	cloudwatchLogsClient *cloudwatchlogs.Client
+	keyspacesClient      *keyspaces.Client
+	cloudwatchClient     *cloudwatch.Client
 
+	accountID       string
 	errors          map[string]bool
 	errorsLock      sync.RWMutex
 	lastSummary     string
 	identityPending bool
 
-	rdsCollectors map[string]*RDSCollector
-	ecCollectors  map[string]*ECCollector
+	rdsCollectors      map[string]*RDSCollector
+	ecCollectors       map[string]*ECCollector
+	keyspacesCollector *KeyspacesCollector
+	keyspacesID        string
 
 	endpointsLock sync.RWMutex
 	rdsEndpoints  map[string]common.Endpoint
@@ -131,8 +139,9 @@ func NewDiscoverer(cfg *config.AWSConfig, k8s *k8s.K8S, reg prometheus.Registere
 		awsCfg: awsCfg,
 		ctx:    ctx,
 		reg:    reg,
-		logs:   logs,
-		stop:   make(chan struct{}),
+		logs:    logs,
+		stop:    make(chan struct{}),
+		refresh: make(chan struct{}, 1),
 
 		errors: map[string]bool{},
 
@@ -154,6 +163,8 @@ func NewDiscoverer(cfg *config.AWSConfig, k8s *k8s.K8S, reg prometheus.Registere
 			select {
 			case <-d.stop:
 				return
+			case <-d.refresh:
+				d.discover()
 			case <-t.C:
 				d.discover()
 			}
@@ -163,10 +174,13 @@ func NewDiscoverer(cfg *config.AWSConfig, k8s *k8s.K8S, reg prometheus.Registere
 }
 
 func (d *Discoverer) buildClients() {
+	d.accountID = ""
 	d.identityPending = !logIdentity(d.ctx, d.awsCfg)
 	d.rdsClient = rds.NewFromConfig(d.awsCfg)
 	d.elasticacheClient = elasticache.NewFromConfig(d.awsCfg)
 	d.cloudwatchLogsClient = cloudwatchlogs.NewFromConfig(d.awsCfg)
+	d.keyspacesClient = keyspaces.NewFromConfig(d.awsCfg)
+	d.cloudwatchClient = cloudwatch.NewFromConfig(d.awsCfg)
 }
 
 func (d *Discoverer) RDSClient() *rds.Client {
@@ -191,6 +205,10 @@ func (d *Discoverer) Stop() {
 		prometheus.WrapRegistererWith(ecLabels(id), d.reg).Unregister(c)
 		c.Stop()
 	}
+	if d.keyspacesCollector != nil {
+		prometheus.WrapRegistererWith(keyspacesLabels(d.keyspacesID), d.reg).Unregister(d.keyspacesCollector)
+		d.keyspacesCollector.Stop()
+	}
 	d.reg.Unregister(d)
 }
 
@@ -206,6 +224,10 @@ func (d *Discoverer) Update(cfg *config.AWSConfig) error {
 	d.awsCfg = awsCfg
 	d.region = awsCfg.Region
 	d.buildClients()
+	select {
+	case d.refresh <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
@@ -245,12 +267,19 @@ func (d *Discoverer) discover() {
 	}
 	d.discoverRDS()
 	d.discoverEC()
+	d.discoverKeyspaces()
 	d.publishEndpoints()
 
 	d.errorsLock.RLock()
 	errs := maps.Keys(d.errors)
 	d.errorsLock.RUnlock()
-	summary := fmt.Sprintf("AWS discovery (region=%s): %d RDS instances, %d ElastiCache nodes", d.region, len(d.rdsCollectors), len(d.ecCollectors))
+	ksTables := 0
+	if d.keyspacesCollector != nil {
+		d.keyspacesCollector.mu.RLock()
+		ksTables = len(d.keyspacesCollector.tables)
+		d.keyspacesCollector.mu.RUnlock()
+	}
+	summary := fmt.Sprintf("AWS discovery (region=%s): %d RDS instances, %d ElastiCache nodes, %d Keyspaces tables", d.region, len(d.rdsCollectors), len(d.ecCollectors), ksTables)
 	switch {
 	case len(errs) > 0:
 		klog.Errorf("%s, errors: %s", summary, strings.Join(errs, "; "))
