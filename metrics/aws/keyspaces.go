@@ -282,6 +282,14 @@ func isSystemKeyspace(name string) bool {
 	return strings.HasPrefix(name, "system_")
 }
 
+func isKeyspacesDMLOp(op string) bool {
+	switch op {
+	case "SELECT", "INSERT", "UPDATE", "DELETE", "BATCH":
+		return true
+	}
+	return false
+}
+
 func cloneTableMeta(src map[keyspacesTableKey]keyspacesTableMeta) map[keyspacesTableKey]keyspacesTableMeta {
 	dst := make(map[keyspacesTableKey]keyspacesTableMeta, len(src))
 	for k, v := range src {
@@ -663,8 +671,8 @@ func listActiveKeyspacesMetrics(ctx context.Context, client *cloudwatch.Client, 
 			opKey := keyspacesOpKey{Keyspace: ks, Table: tbl, Operation: op}
 			switch name {
 			case "SuccessfulRequestLatency":
-				// Exclude account-level EXECUTE; per-table DML ops return real p99 + exact SampleCount.
-				if op != "" && op != "EXECUTE" && !seenLatency[opKey] {
+				// Only poll DML ops (exclude account-level EXECUTE and one-time DDL like CREATE_TABLE).
+				if isKeyspacesDMLOp(op) && !seenLatency[opKey] {
 					seenLatency[opKey] = true
 					res.latencyOps = append(res.latencyOps, opKey)
 				}

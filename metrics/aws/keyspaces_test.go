@@ -19,6 +19,14 @@ func TestKeyspacesTagAndSystemFiltering(t *testing.T) {
 	assert.False(t, isSystemKeyspace("orders_prod"))
 	assert.False(t, isSystemKeyspace("keyspaces_val"))
 
+	assert.True(t, isKeyspacesDMLOp("SELECT"))
+	assert.True(t, isKeyspacesDMLOp("INSERT"))
+	assert.True(t, isKeyspacesDMLOp("UPDATE"))
+	assert.True(t, isKeyspacesDMLOp("DELETE"))
+	assert.True(t, isKeyspacesDMLOp("BATCH"))
+	assert.False(t, isKeyspacesDMLOp("CREATE_TABLE"))
+	assert.False(t, isKeyspacesDMLOp("EXECUTE"))
+
 	assert.True(t, tagsMatched(map[string]string{"project": "keyspaces-*"}, map[string]string{"project": "keyspaces-val", "env": "prod"}))
 	assert.False(t, tagsMatched(map[string]string{"project": "keyspaces-*", "team": "checkout"}, map[string]string{"project": "keyspaces-val"}))
 	assert.True(t, tagsMatched(map[string]string{}, map[string]string{}))
