@@ -462,6 +462,7 @@ func queryKeyspacesSystemPeers(ctx context.Context, awsCfg aws.Config, region, s
 
 	cluster := gocql.NewCluster(ip)
 	cluster.Port = 9142
+	cluster.Consistency = gocql.LocalQuorum
 	cluster.Authenticator = &auth
 	cluster.SslOpts = &gocql.SslOptions{
 		Config: &tls.Config{
