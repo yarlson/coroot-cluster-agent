@@ -16,8 +16,10 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/elasticache"
+	"github.com/aws/aws-sdk-go-v2/service/keyspaces"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
@@ -50,6 +52,9 @@ type Discoverer struct {
 	rdsClient            *rds.Client
 	elasticacheClient    *elasticache.Client
 	cloudwatchLogsClient *cloudwatchlogs.Client
+	cloudwatchClient     *cloudwatch.Client
+	keyspacesClient      *keyspaces.Client
+	stsClient            *sts.Client
 
 	errors          map[string]bool
 	errorsLock      sync.RWMutex
@@ -58,6 +63,7 @@ type Discoverer struct {
 
 	rdsCollectors map[string]*RDSCollector
 	ecCollectors  map[string]*ECCollector
+	keyspaces     *Keyspaces
 
 	endpointsLock sync.RWMutex
 	rdsEndpoints  map[string]common.Endpoint
@@ -167,6 +173,9 @@ func (d *Discoverer) buildClients() {
 	d.rdsClient = rds.NewFromConfig(d.awsCfg)
 	d.elasticacheClient = elasticache.NewFromConfig(d.awsCfg)
 	d.cloudwatchLogsClient = cloudwatchlogs.NewFromConfig(d.awsCfg)
+	d.cloudwatchClient = cloudwatch.NewFromConfig(d.awsCfg)
+	d.keyspacesClient = keyspaces.NewFromConfig(d.awsCfg)
+	d.stsClient = sts.NewFromConfig(d.awsCfg)
 }
 
 func (d *Discoverer) RDSClient() *rds.Client {
@@ -190,6 +199,9 @@ func (d *Discoverer) Stop() {
 	for id, c := range d.ecCollectors {
 		prometheus.WrapRegistererWith(ecLabels(id), d.reg).Unregister(c)
 		c.Stop()
+	}
+	if d.keyspaces != nil {
+		d.reg.Unregister(d.keyspaces)
 	}
 	d.reg.Unregister(d)
 }
@@ -246,11 +258,15 @@ func (d *Discoverer) discover() {
 	d.discoverRDS()
 	d.discoverEC()
 	d.publishEndpoints()
+	d.discoverKeyspaces()
 
 	d.errorsLock.RLock()
 	errs := maps.Keys(d.errors)
 	d.errorsLock.RUnlock()
 	summary := fmt.Sprintf("AWS discovery (region=%s): %d RDS instances, %d ElastiCache nodes", d.region, len(d.rdsCollectors), len(d.ecCollectors))
+	if d.keyspaces != nil {
+		summary += fmt.Sprintf(", %d Keyspaces tables", d.keyspaces.TablesCount())
+	}
 	switch {
 	case len(errs) > 0:
 		klog.Errorf("%s, errors: %s", summary, strings.Join(errs, "; "))
@@ -310,6 +326,25 @@ func (d *Discoverer) discoverRDS() {
 			c.Stop()
 		}
 	}
+}
+
+func (d *Discoverer) discoverKeyspaces() {
+	if d.keyspaces != nil && (!d.cfg.KeyspacesEnabled || d.keyspaces.cfg != d.cfg) {
+		d.reg.Unregister(d.keyspaces)
+		d.keyspaces = nil
+	}
+	if !d.cfg.KeyspacesEnabled {
+		return
+	}
+	if d.keyspaces == nil {
+		k := NewKeyspaces(d.cfg)
+		if err := d.reg.Register(k); err != nil {
+			klog.Error(err)
+			return
+		}
+		d.keyspaces = k
+	}
+	d.keyspaces.refresh(d)
 }
 
 func (d *Discoverer) discoverEC() {

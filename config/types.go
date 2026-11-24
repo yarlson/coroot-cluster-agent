@@ -47,6 +47,9 @@ type AWSConfig struct {
 
 	RDSTagFilters         map[string]string `json:"rds_tag_filters" yaml:"rdsTagFilters"`
 	ElasticacheTagFilters map[string]string `json:"elasticache_tag_filters" yaml:"elasticacheTagFilters"`
+
+	KeyspacesEnabled    bool              `json:"keyspaces_enabled" yaml:"keyspacesEnabled"`
+	KeyspacesTagFilters map[string]string `json:"keyspaces_tag_filters" yaml:"keyspacesTagFilters"`
 }
 
 func (c *AWSConfig) Equal(other *AWSConfig) bool {
@@ -54,7 +57,9 @@ func (c *AWSConfig) Equal(other *AWSConfig) bool {
 		c.AccessKeyID == other.AccessKeyID &&
 		c.SecretAccessKey == other.SecretAccessKey &&
 		maps.Equal(c.RDSTagFilters, other.RDSTagFilters) &&
-		maps.Equal(c.ElasticacheTagFilters, other.ElasticacheTagFilters)
+		maps.Equal(c.ElasticacheTagFilters, other.ElasticacheTagFilters) &&
+		c.KeyspacesEnabled == other.KeyspacesEnabled &&
+		maps.Equal(c.KeyspacesTagFilters, other.KeyspacesTagFilters)
 }
 
 type GCPConfig struct {
